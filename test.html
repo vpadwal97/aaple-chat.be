@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Socket Test</title>
+  </head>
+
+  <body>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+
+    <script>
+      const socket = io("http://localhost:10000");
+
+      socket.on("connect", () => {
+        console.log("CONNECTED:", socket.id);
+
+        socket.emit("join", {
+          username: "Vishu",
+          interests: ["anime", "coding"],
+        });
+
+        socket.emit("findPartner");
+      });
+
+      socket.on("matched", (data) => {
+        console.log("MATCHED:", data);
+      });
+
+      socket.on("onlineUsers", (data) => {
+        console.log("ONLINE USERS:", data);
+      });
+    </script>
+  </body>
+</html>
