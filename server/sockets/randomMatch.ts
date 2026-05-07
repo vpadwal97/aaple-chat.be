@@ -152,8 +152,8 @@ export const randomMatchHandler = (
         text: message,
       });
 
-      socket.to(roomId).emit(
-        "randomMessage",
+      io.to(roomId).emit(
+  "randomMessage",
         {
           user: currentUser.username,
           message,
