@@ -4,6 +4,7 @@ import {
   waitingQueue,
   activeRooms,
   onlineUsers,
+  recentSkips,
 } from "../memory/store";
 
 import { findBestMatch } from "../services/matchmaking";
@@ -14,6 +15,168 @@ import Conversation from "../models/Conversation";
 
 import Message from "../models/Message";
 
+// =========================
+// ADD USER TO QUEUE
+// =========================
+const addToQueue = (
+  socketId: string
+) => {
+  const currentUser =
+    onlineUsers.get(socketId);
+
+  if (!currentUser) return;
+
+  // prevent duplicate queue
+  const exists =
+    waitingQueue.find(
+      (u) =>
+        u.socketId === socketId
+    );
+
+  if (exists) return;
+
+  waitingQueue.push({
+    socketId,
+    username:
+      currentUser.username,
+    interests:
+      currentUser.interests,
+  });
+
+  console.log(
+    "⏳ QUEUED:",
+    currentUser.username
+  );
+};
+
+// =========================
+// TRY MATCH USER
+// =========================
+const tryMatchUser = async (
+  io: Server,
+  socketId: string
+) => {
+  const currentUser =
+    onlineUsers.get(socketId);
+
+  if (!currentUser) return;
+
+  const partner =
+    findBestMatch(
+      socketId,
+      currentUser.interests
+    );
+
+  // no partner
+  if (!partner) {
+    addToQueue(socketId);
+
+    io.to(socketId).emit(
+      "searching"
+    );
+
+    return;
+  }
+
+  // remove partner from queue
+  const partnerIndex =
+    waitingQueue.findIndex(
+      (u) =>
+        u.socketId ===
+        partner.socketId
+    );
+
+  if (partnerIndex !== -1) {
+    waitingQueue.splice(
+      partnerIndex,
+      1
+    );
+  }
+
+  // remove current user too
+  const currentIndex =
+    waitingQueue.findIndex(
+      (u) =>
+        u.socketId === socketId
+    );
+
+  if (currentIndex !== -1) {
+    waitingQueue.splice(
+      currentIndex,
+      1
+    );
+  }
+
+  const roomId =
+    generateRoomId();
+
+  const currentSocket =
+    io.sockets.sockets.get(
+      socketId
+    );
+
+  const partnerSocket =
+    io.sockets.sockets.get(
+      partner.socketId
+    );
+
+  if (
+    !currentSocket ||
+    !partnerSocket
+  ) {
+    return;
+  }
+
+  currentSocket.join(roomId);
+
+  partnerSocket.join(roomId);
+
+  activeRooms.set(roomId, [
+    socketId,
+    partner.socketId,
+  ]);
+
+  // save conversation
+  await Conversation.create({
+    roomId,
+    participants: [
+      currentUser.username,
+      partner.username,
+    ],
+    isRandom: true,
+  });
+
+  const commonInterests =
+    currentUser.interests.filter(
+      (i) =>
+        partner.interests.includes(
+          i
+        )
+    );
+
+  console.log(
+    "🎉 MATCHED:",
+    currentUser.username,
+    "<->",
+    partner.username
+  );
+
+  io.to(roomId).emit(
+    "matched",
+    {
+      roomId,
+      users: [
+        currentUser.username,
+        partner.username,
+      ],
+      commonInterests,
+    }
+  );
+};
+
+// =========================
+// MAIN HANDLER
+// =========================
 export const randomMatchHandler = (
   io: Server,
   socket: Socket
@@ -21,115 +184,23 @@ export const randomMatchHandler = (
   // =========================
   // FIND PARTNER
   // =========================
-  socket.on("findPartner", async () => {
-    const currentUser = onlineUsers.get(socket.id);
-
-    if (!currentUser) return;
-
-    console.log(
-      "🔍 FIND PARTNER:",
-      currentUser.username
-    );
-
-    // prevent duplicate queue
-    const alreadyQueued = waitingQueue.find(
-      (u) => u.socketId === socket.id
-    );
-
-    if (alreadyQueued) {
-      return;
-    }
-
-    // =========================
-    // FIND BEST MATCH
-    // =========================
-    const partner = findBestMatch(
-      currentUser.interests
-    );
-
-    // =========================
-    // MATCH FOUND
-    // =========================
-    if (partner) {
-      // remove partner from queue
-      const partnerIndex =
-        waitingQueue.findIndex(
-          (u) => u.socketId === partner.socketId
-        );
-
-      if (partnerIndex !== -1) {
-        waitingQueue.splice(partnerIndex, 1);
-      }
-
-      const roomId = generateRoomId();
-
-      socket.join(roomId);
-
-      const partnerSocket =
-        io.sockets.sockets.get(partner.socketId);
-
-      if (!partnerSocket) {
-        return;
-      }
-
-      partnerSocket.join(roomId);
-
-      activeRooms.set(roomId, [
-        socket.id,
-        partner.socketId,
-      ]);
-
-      // =========================
-      // SAVE CONVERSATION
-      // =========================
-      await Conversation.create({
-        roomId,
-        participants: [
-          currentUser.username,
-          partner.username,
-        ],
-        isRandom: true,
-      });
-
+  socket.on(
+    "findPartner",
+    async () => {
       console.log(
-        "🎉 MATCHED:",
-        currentUser.username,
-        "WITH",
-        partner.username
+        "🔍 FIND PARTNER:",
+        socket.id
       );
 
-      io.to(roomId).emit("matched", {
-        roomId,
-        users: [
-          currentUser.username,
-          partner.username,
-        ],
-        commonInterests:
-          currentUser.interests.filter((i) =>
-            partner.interests.includes(i)
-          ),
-      });
-    }
-
-    // =========================
-    // NO MATCH
-    // =========================
-    else {
-      waitingQueue.push({
-        socketId: socket.id,
-        username: currentUser.username,
-        interests: currentUser.interests,
-      });
-
-      console.log(
-        "⏳ ADDED TO QUEUE:",
-        currentUser.username
+      await tryMatchUser(
+        io,
+        socket.id
       );
     }
-  });
+  );
 
   // =========================
-  // SEND RANDOM MESSAGE
+  // RANDOM MESSAGE
   // =========================
   socket.on(
     "randomMessage",
@@ -141,21 +212,26 @@ export const randomMatchHandler = (
       message: string;
     }) => {
       const currentUser =
-        onlineUsers.get(socket.id);
+        onlineUsers.get(
+          socket.id
+        );
 
       if (!currentUser) return;
 
       // save message
       await Message.create({
         roomId,
-        sender: currentUser.username,
+        sender:
+          currentUser.username,
         text: message,
       });
 
+      // emit to BOTH
       io.to(roomId).emit(
-  "randomMessage",
+        "randomMessage",
         {
-          user: currentUser.username,
+          user:
+            currentUser.username,
           message,
         }
       );
@@ -163,36 +239,131 @@ export const randomMatchHandler = (
   );
 
   // =========================
-  // SKIP / LEAVE
+  // SKIP PARTNER
   // =========================
   socket.on(
-    "leaveRandom",
-    async (roomId: string) => {
+    "skipPartner",
+    async (
+      roomId: string
+    ) => {
       const roomUsers =
-        activeRooms.get(roomId);
+        activeRooms.get(
+          roomId
+        );
 
       if (!roomUsers) return;
 
-      const partnerId = roomUsers.find(
-        (id) => id !== socket.id
-      );
+      const partnerId =
+        roomUsers.find(
+          (id) =>
+            id !== socket.id
+        );
 
-      if (partnerId) {
-        io.to(partnerId).emit(
-          "partnerLeft"
+      if (!partnerId) return;
+
+      // =====================
+      // STORE SKIPS
+      // =====================
+      if (
+        !recentSkips.has(
+          socket.id
+        )
+      ) {
+        recentSkips.set(
+          socket.id,
+          new Set()
         );
       }
 
-      activeRooms.delete(roomId);
+      if (
+        !recentSkips.has(
+          partnerId
+        )
+      ) {
+        recentSkips.set(
+          partnerId,
+          new Set()
+        );
+      }
 
+      recentSkips
+        .get(socket.id)
+        ?.add(partnerId);
+
+      recentSkips
+        .get(partnerId)
+        ?.add(socket.id);
+
+      // =====================
+      // CLEAN ROOM
+      // =====================
+      activeRooms.delete(
+        roomId
+      );
+
+      socket.leave(roomId);
+
+      io.sockets.sockets
+        .get(partnerId)
+        ?.leave(roomId);
+
+      // end conversation
       await Conversation.findOneAndUpdate(
         { roomId },
         {
-          endedAt: new Date(),
+          endedAt:
+            new Date(),
         }
       );
 
-      console.log("🚪 ROOM CLOSED:", roomId);
+      console.log(
+        "⏭️ SKIPPED:",
+        socket.id,
+        "<->",
+        partnerId
+      );
+
+      // =====================
+      // RESET BOTH
+      // =====================
+      io.to(socket.id).emit(
+        "partnerSkipped"
+      );
+
+      io.to(partnerId).emit(
+        "partnerSkipped"
+      );
+
+      // =====================
+      // AUTO REQUEUE
+      // =====================
+      await tryMatchUser(
+        io,
+        socket.id
+      );
+
+      await tryMatchUser(
+        io,
+        partnerId
+      );
+
+      // =====================
+      // CLEAR SKIP MEMORY
+      // after 2 minutes
+      // =====================
+      setTimeout(() => {
+        recentSkips
+          .get(socket.id)
+          ?.delete(
+            partnerId
+          );
+
+        recentSkips
+          .get(partnerId)
+          ?.delete(
+            socket.id
+          );
+      }, 1000 * 60 * 2);
     }
   );
 };
