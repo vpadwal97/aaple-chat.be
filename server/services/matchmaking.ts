@@ -1,5 +1,7 @@
 import {
   waitingQueue,
+  recentSkips,
+  QueueUser,
 } from "../memory/store";
 
 import {
@@ -7,31 +9,78 @@ import {
 } from "../utils/helpers";
 
 export const findBestMatch = (
+  currentSocketId: string,
   interests: string[]
-) => {
+): QueueUser | null => {
   if (waitingQueue.length === 0) {
     return null;
   }
 
-  let bestMatch = null;
+  let bestMatch: QueueUser | null =
+    null;
 
-  let bestScore = 0;
+  let highestScore = -1;
 
   for (const user of waitingQueue) {
-    const common = findCommonInterests(
-      interests,
-      user.interests
-    );
+    // =========================
+    // DON'T MATCH SELF
+    // =========================
+    if (
+      user.socketId === currentSocketId
+    ) {
+      continue;
+    }
 
-    if (common.length > bestScore) {
-      bestScore = common.length;
+    // =========================
+    // SKIP LOOP PREVENTION
+    // =========================
+    const skippedUsers =
+      recentSkips.get(
+        currentSocketId
+      );
+
+    if (
+      skippedUsers?.has(
+        user.socketId
+      )
+    ) {
+      continue;
+    }
+
+    // =========================
+    // INTEREST SCORE
+    // =========================
+    const commonInterests =
+      findCommonInterests(
+        interests,
+        user.interests
+      );
+
+    const score =
+      commonInterests.length;
+
+    // =========================
+    // BEST MATCH
+    // =========================
+    if (score > highestScore) {
+      highestScore = score;
+
       bestMatch = user;
     }
   }
 
-  // fallback random
+  // =========================
+  // RANDOM FALLBACK
+  // =========================
   if (!bestMatch) {
-    bestMatch = waitingQueue[0];
+    for (const user of waitingQueue) {
+      if (
+        user.socketId !==
+        currentSocketId
+      ) {
+        return user;
+      }
+    }
   }
 
   return bestMatch;
